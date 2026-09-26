@@ -1,5 +1,6 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { fitnessApi } from '../services/api';
 
 export interface Exercise {
   id: string;
@@ -24,6 +25,7 @@ export interface DailyStats {
   calories: number;
   activeMinutes: number;
   distance: number;
+  waterIntake?: number;
 }
 
 export interface NutritionEntry {
@@ -75,7 +77,9 @@ interface FitnessContextType {
   updateGoal: (goal: Goal) => Promise<void>;
   deleteGoal: (id: string) => Promise<void>;
   updateTodayStats: (stats: Partial<DailyStats>) => Promise<void>;
+  syncWithServer: () => Promise<void>;
   isLoading: boolean;
+  isBackendConnected: boolean;
 }
 
 const FitnessContext = createContext<FitnessContextType>({} as FitnessContextType);
@@ -130,6 +134,7 @@ export const FitnessProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [sleepLog, setSleepLog] = useState<SleepEntry[]>(SAMPLE_SLEEP);
   const [goals, setGoals] = useState<Goal[]>(SAMPLE_GOALS);
   const [isLoading, setIsLoading] = useState(false);
+  const [isBackendConnected, setIsBackendConnected] = useState(false);
   const [todayStats, setTodayStats] = useState<DailyStats>({
     date: today(),
     steps: 8432,
@@ -140,52 +145,140 @@ export const FitnessProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   const streak = 14;
 
+  // Initialize data from local storage first, then sync with backend
+  useEffect(() => {
+    const initData = async () => {
+      try {
+        const storedWorkouts = await AsyncStorage.getItem('workouts');
+        if (storedWorkouts) setWorkouts(JSON.parse(storedWorkouts));
+
+        const storedGoals = await AsyncStorage.getItem('goals');
+        if (storedGoals) setGoals(JSON.parse(storedGoals));
+
+        const storedNutrition = await AsyncStorage.getItem('nutrition');
+        if (storedNutrition) setNutritionLog(JSON.parse(storedNutrition));
+
+        const storedSleep = await AsyncStorage.getItem('sleep');
+        if (storedSleep) setSleepLog(JSON.parse(storedSleep));
+      } catch (e) {
+        console.warn('Error loading cached fitness data:', e);
+      }
+
+      // Try initial sync with backend
+      syncWithServer();
+    };
+
+    initData();
+  }, []);
+
+  const syncWithServer = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      const serverWorkouts = await fitnessApi.getWorkouts();
+      if (serverWorkouts && serverWorkouts.length > 0) {
+        setWorkouts(serverWorkouts);
+        await AsyncStorage.setItem('workouts', JSON.stringify(serverWorkouts));
+        setIsBackendConnected(true);
+      }
+
+      const serverTodayStats = await fitnessApi.getTodayStats();
+      if (serverTodayStats) {
+        setTodayStats(serverTodayStats);
+        setIsBackendConnected(true);
+      }
+
+      const serverGoals = await fitnessApi.getGoals();
+      if (serverGoals && serverGoals.length > 0) {
+        setGoals(serverGoals);
+        await AsyncStorage.setItem('goals', JSON.stringify(serverGoals));
+      }
+
+      const serverNutrition = await fitnessApi.getNutrition();
+      if (serverNutrition && serverNutrition.length > 0) {
+        setNutritionLog(serverNutrition);
+        await AsyncStorage.setItem('nutrition', JSON.stringify(serverNutrition));
+      }
+
+      const serverSleep = await fitnessApi.getSleep();
+      if (serverSleep && serverSleep.length > 0) {
+        setSleepLog(serverSleep);
+        await AsyncStorage.setItem('sleep', JSON.stringify(serverSleep));
+      }
+    } catch (err) {
+      console.log('Backend sync skipped or offline:', err);
+      setIsBackendConnected(false);
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
   const addWorkout = async (workout: Workout) => {
     const updated = [workout, ...workouts];
     setWorkouts(updated);
     await AsyncStorage.setItem('workouts', JSON.stringify(updated));
+    // Asynchronously push to backend
+    fitnessApi.createWorkout(workout).catch(err => console.warn('Sync workout error:', err));
   };
 
   const updateWorkout = async (workout: Workout) => {
     const updated = workouts.map(w => w.id === workout.id ? workout : w);
     setWorkouts(updated);
     await AsyncStorage.setItem('workouts', JSON.stringify(updated));
+    fitnessApi.updateWorkout(workout).catch(err => console.warn('Sync workout error:', err));
   };
 
   const deleteWorkout = async (id: string) => {
     const updated = workouts.filter(w => w.id !== id);
     setWorkouts(updated);
     await AsyncStorage.setItem('workouts', JSON.stringify(updated));
+    fitnessApi.deleteWorkout(id).catch(err => console.warn('Delete workout error:', err));
   };
 
   const addNutrition = async (entry: NutritionEntry) => {
     const updated = [entry, ...nutritionLog];
     setNutritionLog(updated);
+    await AsyncStorage.setItem('nutrition', JSON.stringify(updated));
+    fitnessApi.addNutrition(entry).catch(err => console.warn('Add nutrition error:', err));
   };
 
   const deleteNutrition = async (id: string) => {
-    setNutritionLog(prev => prev.filter(e => e.id !== id));
+    const updated = nutritionLog.filter(e => e.id !== id);
+    setNutritionLog(updated);
+    await AsyncStorage.setItem('nutrition', JSON.stringify(updated));
+    fitnessApi.deleteNutrition(id).catch(err => console.warn('Delete nutrition error:', err));
   };
 
   const addSleep = async (entry: SleepEntry) => {
-    setSleepLog(prev => [entry, ...prev]);
+    const updated = [entry, ...sleepLog];
+    setSleepLog(updated);
+    await AsyncStorage.setItem('sleep', JSON.stringify(updated));
+    fitnessApi.addSleep(entry).catch(err => console.warn('Add sleep error:', err));
   };
 
   const addGoal = async (goal: Goal) => {
     const updated = [...goals, goal];
     setGoals(updated);
+    await AsyncStorage.setItem('goals', JSON.stringify(updated));
+    fitnessApi.addGoal(goal).catch(err => console.warn('Add goal error:', err));
   };
 
   const updateGoal = async (goal: Goal) => {
-    setGoals(prev => prev.map(g => g.id === goal.id ? goal : g));
+    const updated = goals.map(g => g.id === goal.id ? goal : g);
+    setGoals(updated);
+    await AsyncStorage.setItem('goals', JSON.stringify(updated));
+    fitnessApi.updateGoal(goal).catch(err => console.warn('Update goal error:', err));
   };
 
   const deleteGoal = async (id: string) => {
-    setGoals(prev => prev.filter(g => g.id !== id));
+    const updated = goals.filter(g => g.id !== id);
+    setGoals(updated);
+    await AsyncStorage.setItem('goals', JSON.stringify(updated));
+    fitnessApi.deleteGoal(id).catch(err => console.warn('Delete goal error:', err));
   };
 
   const updateTodayStats = async (stats: Partial<DailyStats>) => {
     setTodayStats(prev => ({ ...prev, ...stats }));
+    fitnessApi.updateTodayStats(stats).catch(err => console.warn('Update stats error:', err));
   };
 
   return (
@@ -194,7 +287,7 @@ export const FitnessProvider: React.FC<{ children: React.ReactNode }> = ({ child
       todayStats, addWorkout, updateWorkout, deleteWorkout,
       addNutrition, deleteNutrition, addSleep,
       addGoal, updateGoal, deleteGoal,
-      updateTodayStats, isLoading,
+      updateTodayStats, syncWithServer, isLoading, isBackendConnected,
     }}>
       {children}
     </FitnessContext.Provider>

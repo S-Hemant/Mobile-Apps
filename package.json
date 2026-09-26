@@ -29,7 +29,10 @@
     "start": "expo start",
     "android": "expo start --android",
     "ios": "expo start --ios",
-    "web": "expo start --web"
+    "web": "expo start --web",
+    "server:dev": "npm --prefix backend run dev",
+    "server:build": "npm --prefix backend run build",
+    "server:start": "npm --prefix backend run start"
   },
   "private": true
 }
